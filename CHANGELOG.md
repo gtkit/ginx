@@ -7,6 +7,11 @@
 ### Added
 
 - `BodySources` 新增 `Err` 字段，`ParseBody` 失败原因可经 `errors.Is` 判定；新增哨兵错误 `ErrNoBody` / `ErrBodyTooLarge` / `ErrUnsupportedContentType` / `ErrMalformedBody`
+- 新增 `RawBody`：读取、缓存并回填完整原始 body，webhook 验签后仍可绑定结构体
+- 新增 `BindBodyCached`：基于缓存字节的可重复 body 绑定，继承只信 body 语义
+- 新增 `SingleValueQuery` 与 `ErrDuplicateQuery`：单值 query 校验，防御 HTTP 参数污染
+- 新增泛型取值 `Query[T]` / `Param[T]`（约束 `Scalar`）：query / 路由参数直接取 string、int、int64、uint64、bool、float64，缺失或非法回退默认值
+- 新增 `RequireContentType`：Content-Type 白名单校验，便于上游返回 415
 
 ### Fixed
 

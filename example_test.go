@@ -60,6 +60,76 @@ func ExampleBindBody() {
 	// Output: body-token
 }
 
+func ExampleRawBody() {
+	// webhook 验签场景：先取原始字节算签名，再绑定结构体，两者不互斥
+	c := newPostContext("application/json", `{"event":"pay.success"}`)
+
+	raw, err := ginx.RawBody(c)
+	if err != nil {
+		fmt.Println("read:", err)
+		return
+	}
+	// verifySignature(raw, c.GetHeader("X-Signature")) ...
+
+	var notify struct {
+		Event string `json:"event"`
+	}
+	if err := ginx.BindBody(c, &notify); err != nil {
+		fmt.Println("bind:", err)
+		return
+	}
+	fmt.Println(len(raw) > 0, notify.Event)
+	// Output: true pay.success
+}
+
+func ExampleBindBodyCached() {
+	c := newPostContext("application/json", `{"token":"t1","scene":"s1"}`)
+
+	var a struct {
+		Token string `json:"token"`
+	}
+	var b struct {
+		Scene string `json:"scene"`
+	}
+	_ = ginx.BindBodyCached(c, &a) // 同一请求可重复绑定
+	_ = ginx.BindBodyCached(c, &b)
+	fmt.Println(a.Token, b.Scene)
+	// Output: t1 s1
+}
+
+func ExampleSingleValueQuery() {
+	c := newPostContext("application/json", "{}")
+	c.Request.URL.RawQuery = "id=1&id=2" // HTTP 参数污染
+
+	_, err := ginx.SingleValueQuery(c, "id")
+	fmt.Println(errors.Is(err, ginx.ErrDuplicateQuery))
+	// Output: true
+}
+
+func ExampleQuery() {
+	c := newPostContext("application/json", "{}")
+	c.Request.URL.RawQuery = "page=3&size=abc"
+
+	fmt.Println(ginx.Query(c, "page", 1), ginx.Query(c, "size", 20), ginx.Query(c, "dry_run", false))
+	// Output: 3 20 false
+}
+
+func ExampleParam() {
+	c := newPostContext("application/json", "{}")
+	c.Params = gin.Params{{Key: "id", Value: "42"}} // 路由 /user/:id
+
+	fmt.Println(ginx.Param(c, "id", int64(0)))
+	// Output: 42
+}
+
+func ExampleRequireContentType() {
+	c := newPostContext("text/plain", "hello")
+
+	err := ginx.RequireContentType(c, "application/json", "application/x-www-form-urlencoded")
+	fmt.Println(errors.Is(err, ginx.ErrUnsupportedContentType))
+	// Output: true
+}
+
 func ExampleSingleValueHeader() {
 	c := newPostContext("application/json", "{}")
 	c.Request.Header.Add("X-Token", "a")

@@ -6,9 +6,12 @@
 聚焦"gin 原生没有优雅解、又跨服务复用"的请求侧痛点：
 
 - **body 只能读一次** —— 读取后回填，使后续 `ShouldBind` 仍可完整读取
+- **原始 body 获取** —— 读取、缓存并回填完整字节，webhook 验签后仍可绑定
 - **按 Content-Type 解析 body** —— `application/json` 与 `application/x-www-form-urlencoded`
-- **只绑 body、不混入 query** —— 规避 gin form 模式把 URL query 并入绑定
-- **单值 header 校验** —— 去空、查重、拒绝逗号多值
+- **只绑 body、不混入 query** —— 规避 gin form 模式把 URL query 并入绑定；支持基于缓存的重复绑定
+- **单值 header / query 校验** —— 去空、查重，防御 HTTP 参数污染
+- **泛型类型化取值** —— query / 路由参数直接取 int、bool 等，缺失或非法回退默认值
+- **Content-Type 白名单** —— 解析与绑定前快速拒绝，便于返回 415
 - **请求 body 硬限长** —— 基于 `http.MaxBytesReader`，防御超大 body 撑爆内存
 
 本包不包含任何中间件、响应封装或业务语义；中间件、统一响应等请放在各自的包中。
@@ -28,7 +31,12 @@ go get github.com/gtkit/ginx
 | `ParseBody(c) BodySources` | 解析并按请求缓存 body，返回 `Available` / `JSON` / `Form` / `Err` |
 | `BodyString(c, field) string` | 从 body 取字段并转字符串（JSON 标量或 form 值） |
 | `BindBody(c, obj) error` | 只把 body 绑定到 obj，不信任 query |
+| `RawBody(c) ([]byte, error)` | 读取完整原始 body，缓存并回填（webhook 验签） |
+| `BindBodyCached(c, obj) error` | 基于缓存字节绑定，同一请求可重复调用 |
+| `RequireContentType(c, types...) error` | Content-Type 白名单校验 |
 | `SingleValueHeader(c, key) (string, error)` | 读取并校验单值 header |
+| `SingleValueQuery(c, key) (string, error)` | 读取并校验单值 query（防参数污染） |
+| `Query[T](c, key, def) T` / `Param[T](c, key, def) T` | 泛型类型化取值，缺失/非法回退默认值 |
 | `LimitRequestBody(c, maxBytes)` | 为 body 设置硬上限（`http.MaxBytesReader`） |
 | `IsRequestBodyTooLarge(err) bool` | 判断 err 是否因 body 超过硬上限产生 |
 | `MaxBodyBytes` | `ParseBody` 的解析软上限（8 KiB） |
@@ -64,6 +72,38 @@ if err := ginx.BindBody(c, &req); err != nil {
         return
     }
     c.AbortWithStatus(http.StatusBadRequest)
+    return
+}
+```
+
+### webhook 验签：原始 body + 重复绑定
+
+```go
+ginx.LimitRequestBody(c, 1<<20) // RawBody 不设软上限，务必配合硬限长
+
+raw, err := ginx.RawBody(c) // 完整原始字节，读后回填并缓存
+if err != nil { /* ... */ }
+verifySignature(raw, c.GetHeader("X-Signature"))
+
+var notify PayNotify
+_ = ginx.BindBodyCached(c, &notify) // 可重复绑定，每次都是完整 body
+```
+
+### 类型化取参数
+
+```go
+page := ginx.Query(c, "page", 1)        // ?page=3 -> 3；缺失/非法 -> 1
+dry  := ginx.Query(c, "dry_run", false)
+id   := ginx.Param(c, "id", int64(0))   // 路由 /user/:id
+
+uid, err := ginx.SingleValueQuery(c, "uid") // ?uid=1&uid=2 -> ErrDuplicateQuery
+```
+
+### Content-Type 白名单
+
+```go
+if err := ginx.RequireContentType(c, "application/json"); err != nil {
+    c.AbortWithStatus(http.StatusUnsupportedMediaType) // 415
     return
 }
 ```

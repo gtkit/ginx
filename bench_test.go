@@ -40,6 +40,29 @@ func BenchmarkParseBodyCached(b *testing.B) {
 	}
 }
 
+func BenchmarkQueryInt(b *testing.B) {
+	c := newContext(http.MethodGet, "/x?page=42", "", "")
+	b.ReportAllocs()
+	for b.Loop() {
+		if got := Query(c, "page", 1); got != 42 {
+			b.Fatalf("Query = %d", got)
+		}
+	}
+}
+
+func BenchmarkRawBodyCached(b *testing.B) {
+	c := newContext(http.MethodPost, "/x", "application/json", `{"k":"v"}`)
+	if _, err := RawBody(c); err != nil {
+		b.Fatalf("RawBody err = %v", err)
+	}
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, err := RawBody(c); err != nil {
+			b.Fatal("cache miss")
+		}
+	}
+}
+
 func BenchmarkBodyString(b *testing.B) {
 	const body = `{"token":"body-token"}`
 	b.ReportAllocs()
