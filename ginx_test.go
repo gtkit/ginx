@@ -375,6 +375,49 @@ func TestReadAndRestoreBodyLimitsKnownLengthRead(t *testing.T) {
 	}
 }
 
+func TestReadAndRestoreBodyKnownLengthReadError(t *testing.T) {
+	c := newContext(http.MethodPost, "/x", "application/json", "")
+	c.Request.Body = &trackingReadCloser{err: errors.New("boom")}
+	c.Request.ContentLength = 10
+
+	if _, err := readAndRestoreBody(c); err == nil {
+		t.Fatal("want read error, got nil")
+	}
+}
+
+func TestReadAndRestoreBodyChunkedRestoresFullBody(t *testing.T) {
+	// 超过 peek 上限，验证剩余部分仍可从原 body 续读
+	body := strings.Repeat("a", MaxBodyBytes+100)
+	c := newContext(http.MethodPost, "/x", "application/json", "")
+	c.Request.Body = &trackingReadCloser{reader: strings.NewReader(body)}
+	c.Request.ContentLength = -1
+
+	peeked, err := readAndRestoreBody(c)
+	if err != nil {
+		t.Fatalf("readAndRestoreBody err = %v", err)
+	}
+	if len(peeked) != MaxBodyBytes+1 {
+		t.Fatalf("len(peeked) = %d, want %d", len(peeked), MaxBodyBytes+1)
+	}
+	raw, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		t.Fatalf("read restored body: %v", err)
+	}
+	if string(raw) != body {
+		t.Fatal("restored chunked body mismatch")
+	}
+}
+
+func TestReadAndRestoreBodyChunkedReadError(t *testing.T) {
+	c := newContext(http.MethodPost, "/x", "application/json", "")
+	c.Request.Body = &trackingReadCloser{err: errors.New("boom")}
+	c.Request.ContentLength = -1
+
+	if _, err := readAndRestoreBody(c); err == nil {
+		t.Fatal("want read error, got nil")
+	}
+}
+
 func TestMultiReadCloserCloseClosesOriginal(t *testing.T) {
 	orig := &trackingReadCloser{reader: strings.NewReader("abc")}
 	rc := newMultiReadCloser(strings.NewReader("abc"), orig)
