@@ -1,3 +1,38 @@
-.idea/
-.Ds_Store
+# 系统 / IDE
 .DS_Store
+__MACOSX/
+.idea/
+.vscode/
+
+# 敏感信息
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets.*
+credentials.*
+
+# 构建 / 测试产物
+bin/
+dist/
+build/
+coverage/
+coverage.out
+*.log
+
+# Harness: 本地工具与 Agent 运行产物
+.harness/
+.claude/
+.codex/
+.agents/
+.openspec-auto/
+.openspec-auto-backup/
+.learnings/
+openspec/
+tools/
+AGENTS.md
+CLAUDE.md
+findings.md
+progress.md
+task_plan.md
