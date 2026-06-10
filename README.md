@@ -1,5 +1,7 @@
 # ginx
 
+[![CI](https://github.com/gtkit/ginx/actions/workflows/ci.yml/badge.svg)](https://github.com/gtkit/ginx/actions/workflows/ci.yml)
+
 `github.com/gtkit/ginx` 提供一组与业务无关的通用 [gin](https://github.com/gin-gonic/gin) 请求参数处理工具，
 聚焦"gin 原生没有优雅解、又跨服务复用"的请求侧痛点：
 
