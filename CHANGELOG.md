@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-06-10
+
 ### Added
 
 - `BodySources` 新增 `Err` 字段，`ParseBody` 失败原因可经 `errors.Is` 判定；新增哨兵错误 `ErrNoBody` / `ErrBodyTooLarge` / `ErrUnsupportedContentType` / `ErrMalformedBody`
@@ -33,6 +35,7 @@
   - `LimitRequestBody` / `IsRequestBodyTooLarge`：基于 `http.MaxBytesReader` 的请求体硬限长
   - `MaxBodyBytes` 软上限常量与 `ErrDuplicateHeader` / `ErrInvalidHeaderValue` / `ErrInvalidBindContext` 哨兵错误
 
-[Unreleased]: https://github.com/gtkit/ginx/compare/v1.0.1...HEAD
+[Unreleased]: https://github.com/gtkit/ginx/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/gtkit/ginx/compare/v1.0.1...v1.1.0
 [1.0.1]: https://github.com/gtkit/ginx/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/gtkit/ginx/releases/tag/v1.0.0
