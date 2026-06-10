@@ -4,6 +4,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- `BodySources` 新增 `Err` 字段，`ParseBody` 失败原因可经 `errors.Is` 判定；新增哨兵错误 `ErrNoBody` / `ErrBodyTooLarge` / `ErrUnsupportedContentType` / `ErrMalformedBody`
+
+### Fixed
+
+- 修复 `BodyString` 读取超过 2^53 的 JSON 整数时精度丢失的问题；JSON 数字现按 body 原文返回（如 `1.50` 返回 `"1.50"` 而非 `"1.5"`）
+
 ## [1.0.1] - 2026-06-01
 
 无对外功能变更，与 v1.0.0 内容一致。

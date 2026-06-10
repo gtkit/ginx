@@ -3,6 +3,12 @@
 // 不混入 query，以及用 http.MaxBytesReader 对 body 设硬上限等。
 //
 // 这些函数不含任何业务语义，按请求在 gin.Context 上缓存解析结果，适合作为各服务的通用请求处理底座。
+//
+// 支持的 body 类型为 application/json 与 application/x-www-form-urlencoded；不支持
+// multipart/form-data（通常携带文件、体积大，与按 MaxBodyBytes 轻量探取的定位冲突）。
+//
+// 并发安全：与 gin.Context 本身一致。本包函数会替换 c.Request.Body、临时修改 URL.RawQuery，
+// 必须在处理该请求的 handler goroutine 内调用，不得跨 goroutine 并发操作同一个 Context。
 package ginx
 
 import (
@@ -34,22 +40,38 @@ var (
 	ErrInvalidHeaderValue = errors.New("header contains invalid value")
 	// ErrInvalidBindContext 表示 BindBody 收到的 context / Request / URL 为 nil，无法绑定。
 	ErrInvalidBindContext = errors.New("invalid bind body context")
+	// ErrNoBody 表示请求没有可解析的 body：context 或 body 为 nil，或方法为 GET/HEAD。
+	ErrNoBody = errors.New("request has no parsable body")
+	// ErrBodyTooLarge 表示请求 body 长度超过 MaxBodyBytes 软上限，ParseBody 拒绝解析。
+	ErrBodyTooLarge = errors.New("request body exceeds MaxBodyBytes")
+	// ErrUnsupportedContentType 表示 Content-Type 不在 ParseBody 支持的类型范围内。
+	ErrUnsupportedContentType = errors.New("unsupported content type")
+	// ErrMalformedBody 表示 body 语法非法：JSON 语法错误、JSON 尾部存在多余数据或 form 编码非法，
+	// 底层解析错误可经 errors.As / Unwrap 获取。
+	ErrMalformedBody = errors.New("malformed request body")
 )
 
 // BodySources 承载一次请求 body 的解析结果：Available 表示是否解析成功，JSON 与 Form 分别对应
 // application/json 与 application/x-www-form-urlencoded 两种 body 的解析产物（另一种为 nil）。
+// JSON 中的数字以 json.Number 承载（UseNumber 解码），原样保留 body 中的字面量。
+//
+// Err 在 Available 为 false 时说明失败原因，可用 errors.Is 判定 ErrNoBody、ErrBodyTooLarge、
+// ErrUnsupportedContentType、ErrMalformedBody（body 读取失败时为相应读取错误的包装）；
+// Available 为 true 时恒为 nil。结果按请求缓存，同一请求内重复调用返回相同的 Err。
 type BodySources struct {
 	Available bool
 	JSON      map[string]any
 	Form      url.Values
+	Err       error
 }
 
 // ParseBody 解析请求 body 并按请求缓存结果（同一请求内多次调用只读取/解析一次 body）。命中缓存直接
 // 返回；否则经跳过判断（nil body、GET/HEAD、ContentLength 超 MaxBodyBytes）、限长读取并回填 body 后
-// 按 Content-Type 解析。任一环节失败或不支持的类型均返回 Available 为 false 的零值结果。
+// 按 Content-Type 解析。任一环节失败或不支持的类型均返回 Available 为 false 的结果，
+// 失败原因经 Err 字段透出（见 BodySources）。
 func ParseBody(c *gin.Context) (sources BodySources) {
 	if c == nil {
-		return BodySources{}
+		return BodySources{Err: ErrNoBody}
 	}
 	if v, ok := c.Get(ctxKeyBodyParseCache); ok {
 		if cached, typeOK := v.(BodySources); typeOK {
@@ -60,16 +82,16 @@ func ParseBody(c *gin.Context) (sources BodySources) {
 		c.Set(ctxKeyBodyParseCache, sources)
 	}()
 
-	if skipBodyParse(c) {
-		return BodySources{}
+	if err := skipBodyParse(c); err != nil {
+		return BodySources{Err: err}
 	}
 
 	rawBody, err := readAndRestoreBody(c)
 	if err != nil {
-		return BodySources{}
+		return BodySources{Err: err}
 	}
 	if len(rawBody) > MaxBodyBytes {
-		return BodySources{}
+		return BodySources{Err: ErrBodyTooLarge}
 	}
 
 	return parseRawBodySources(c.ContentType(), rawBody)
@@ -88,8 +110,9 @@ func BodyString(c *gin.Context, field string) string {
 	return strings.TrimSpace(sources.Form.Get(field))
 }
 
-// jsonScalarString 将 JSON 解码出的标量值（string/bool/float64/fmt.Stringer）转为去除首尾空白的
-// 字符串；非标量或不支持的类型返回空串。
+// jsonScalarString 将 JSON 解码出的标量值（string/bool/fmt.Stringer/float64）转为去除首尾空白的
+// 字符串；非标量或不支持的类型返回空串。数字经 UseNumber 解码为 json.Number（fmt.Stringer），
+// 原样返回 body 中的字面量；float64 分支仅作为后端不支持 UseNumber 时的防御。
 func jsonScalarString(value any) string {
 	switch v := value.(type) {
 	case string:
@@ -108,6 +131,9 @@ func jsonScalarString(value any) string {
 // BindBody 仅将请求 body 绑定到 obj。绑定前临时清空 URL.RawQuery，避免 gin 在 form 模式下把
 // query 参数一并并入绑定结果——确保只信任 body、不信任 query；绑定结束后恢复 RawQuery。
 // context、Request 或 URL 为 nil 时返回 ErrInvalidBindContext。
+//
+// 绑定会消费 body 流（一次性语义）：同一请求内第二次调用将读到空 body。如需先探取字段再绑定，
+// 先调用 ParseBody（它会回填 body）、再调用本函数。
 func BindBody(c *gin.Context, obj any) error {
 	if c == nil || c.Request == nil || c.Request.URL == nil {
 		return ErrInvalidBindContext
@@ -171,36 +197,45 @@ func SingleValueHeader(c *gin.Context, headerKey string) (string, error) {
 	return "", nil
 }
 
-// skipBodyParse 判断是否应跳过 body 解析：body 为 nil、GET/HEAD 方法、或 ContentLength 超过
-// MaxBodyBytes 时跳过。
-func skipBodyParse(c *gin.Context) bool {
+// skipBodyParse 判断是否应跳过 body 解析，返回跳过原因：body 为 nil、GET/HEAD 方法返回 ErrNoBody，
+// ContentLength 超过 MaxBodyBytes 返回 ErrBodyTooLarge，可解析时返回 nil。
+func skipBodyParse(c *gin.Context) error {
 	if c.Request == nil || c.Request.Body == nil {
-		return true
+		return ErrNoBody
 	}
 	if c.Request.Method == http.MethodGet || c.Request.Method == http.MethodHead {
-		return true
+		return ErrNoBody
 	}
-	return c.Request.ContentLength > int64(MaxBodyBytes)
+	if c.Request.ContentLength > int64(MaxBodyBytes) {
+		return ErrBodyTooLarge
+	}
+	return nil
 }
 
-// parseRawBodySources 按 Content-Type 解析原始 body：application/json 解析为 map，
-// application/x-www-form-urlencoded 解析为 url.Values；其他类型或解析失败返回 Available 为 false。
+// parseRawBodySources 按 Content-Type 解析原始 body：application/json 以 UseNumber 解析为
+// map（数字保留原始字面量、不丢精度），application/x-www-form-urlencoded 解析为 url.Values；
+// 其他类型或解析失败返回 Available 为 false 并携带相应 Err。
 func parseRawBodySources(contentType string, rawBody []byte) BodySources {
 	switch strings.ToLower(contentType) {
 	case "application/json":
+		dec := gtkitjson.NewDecoder(bytes.NewReader(rawBody))
+		dec.UseNumber()
 		var m map[string]any
-		if err := gtkitjson.Unmarshal(rawBody, &m); err != nil {
-			return BodySources{}
+		if err := dec.Decode(&m); err != nil {
+			return BodySources{Err: fmt.Errorf("%w: %w", ErrMalformedBody, err)}
+		}
+		if dec.More() {
+			return BodySources{Err: fmt.Errorf("%w: unexpected trailing data", ErrMalformedBody)}
 		}
 		return BodySources{Available: true, JSON: m}
 	case "application/x-www-form-urlencoded":
 		values, err := url.ParseQuery(string(rawBody))
 		if err != nil {
-			return BodySources{}
+			return BodySources{Err: fmt.Errorf("%w: %w", ErrMalformedBody, err)}
 		}
 		return BodySources{Available: true, Form: values}
 	default:
-		return BodySources{}
+		return BodySources{Err: ErrUnsupportedContentType}
 	}
 }
 

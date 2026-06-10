@@ -30,6 +30,14 @@ func ExampleParseBody() {
 	// Output: true alice
 }
 
+func ExampleParseBody_failureReason() {
+	c := newPostContext("text/plain", "hello")
+
+	src := ginx.ParseBody(c)
+	fmt.Println(src.Available, errors.Is(src.Err, ginx.ErrUnsupportedContentType))
+	// Output: false true
+}
+
 func ExampleBodyString() {
 	c := newPostContext("application/x-www-form-urlencoded", "token=abc123")
 

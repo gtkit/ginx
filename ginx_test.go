@@ -107,13 +107,16 @@ func TestParseBody(t *testing.T) {
 		wantOK   bool
 		wantJSON bool
 		wantForm bool
+		wantErr  error
 	}{
 		{name: "json", method: http.MethodPost, ct: "application/json", body: `{"k":"v"}`, wantOK: true, wantJSON: true},
 		{name: "json mixed case with charset", method: http.MethodPost, ct: "Application/JSON; charset=utf-8", body: `{"k":"v"}`, wantOK: true, wantJSON: true},
 		{name: "form", method: http.MethodPost, ct: "application/x-www-form-urlencoded", body: "k=v", wantOK: true, wantForm: true},
-		{name: "unsupported content type", method: http.MethodPost, ct: "text/plain", body: "k=v", wantOK: false},
-		{name: "get skipped", method: http.MethodGet, ct: "application/json", body: `{"k":"v"}`, wantOK: false},
-		{name: "invalid json", method: http.MethodPost, ct: "application/json", body: `{`, wantOK: false},
+		{name: "unsupported content type", method: http.MethodPost, ct: "text/plain", body: "k=v", wantErr: ErrUnsupportedContentType},
+		{name: "get skipped", method: http.MethodGet, ct: "application/json", body: `{"k":"v"}`, wantErr: ErrNoBody},
+		{name: "invalid json", method: http.MethodPost, ct: "application/json", body: `{`, wantErr: ErrMalformedBody},
+		{name: "json trailing data", method: http.MethodPost, ct: "application/json", body: `{"k":"v"} x`, wantErr: ErrMalformedBody},
+		{name: "invalid form encoding", method: http.MethodPost, ct: "application/x-www-form-urlencoded", body: "k=%zz", wantErr: ErrMalformedBody},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -122,6 +125,12 @@ func TestParseBody(t *testing.T) {
 			if got.Available != tt.wantOK {
 				t.Fatalf("Available = %v, want %v", got.Available, tt.wantOK)
 			}
+			if !errors.Is(got.Err, tt.wantErr) {
+				t.Fatalf("Err = %v, want %v", got.Err, tt.wantErr)
+			}
+			if tt.wantOK && got.Err != nil {
+				t.Fatalf("Err = %v, want nil on success", got.Err)
+			}
 			if tt.wantJSON && got.JSON == nil {
 				t.Fatal("want JSON map, got nil")
 			}
@@ -129,6 +138,49 @@ func TestParseBody(t *testing.T) {
 				t.Fatal("want Form values, got nil")
 			}
 		})
+	}
+
+	if got := ParseBody(nil); got.Available || !errors.Is(got.Err, ErrNoBody) {
+		t.Fatalf("nil context got Available=%v Err=%v, want false ErrNoBody", got.Available, got.Err)
+	}
+}
+
+func TestParseBodyCachesFailureReason(t *testing.T) {
+	c := newContext(http.MethodPost, "/x", "text/plain", "k=v")
+
+	first := ParseBody(c)
+	if !errors.Is(first.Err, ErrUnsupportedContentType) {
+		t.Fatalf("first Err = %v, want ErrUnsupportedContentType", first.Err)
+	}
+	second := ParseBody(c)
+	if !errors.Is(second.Err, ErrUnsupportedContentType) {
+		t.Fatalf("second Err = %v, want ErrUnsupportedContentType", second.Err)
+	}
+}
+
+func TestParseBodyReadErrorExposed(t *testing.T) {
+	c := newContext(http.MethodPost, "/x", "application/json", "")
+	c.Request.Body = &trackingReadCloser{err: errors.New("boom")}
+	c.Request.ContentLength = 10
+
+	got := ParseBody(c)
+	if got.Available {
+		t.Fatal("Available = true, want false")
+	}
+	if got.Err == nil || !strings.Contains(got.Err.Error(), "boom") {
+		t.Fatalf("Err = %v, want wrapped read error", got.Err)
+	}
+}
+
+func TestParseBodyChunkedOversize(t *testing.T) {
+	body := strings.Repeat("a", MaxBodyBytes+10)
+	c := newContext(http.MethodPost, "/x", "application/json", "")
+	c.Request.Body = &trackingReadCloser{reader: strings.NewReader(body)}
+	c.Request.ContentLength = -1
+
+	got := ParseBody(c)
+	if got.Available || !errors.Is(got.Err, ErrBodyTooLarge) {
+		t.Fatalf("got Available=%v Err=%v, want false ErrBodyTooLarge", got.Available, got.Err)
 	}
 }
 
@@ -155,8 +207,8 @@ func TestParseBodyKnownOversizeDoesNotRead(t *testing.T) {
 	c.Request.Body = rc
 	c.Request.ContentLength = int64(len(body))
 
-	if got := ParseBody(c); got.Available {
-		t.Fatal("ParseBody should skip oversize body")
+	if got := ParseBody(c); got.Available || !errors.Is(got.Err, ErrBodyTooLarge) {
+		t.Fatalf("got Available=%v Err=%v, want false ErrBodyTooLarge", got.Available, got.Err)
 	}
 	raw, err := io.ReadAll(c.Request.Body)
 	if err != nil {
@@ -220,6 +272,24 @@ func TestBodyString(t *testing.T) {
 			field:   "token",
 			want:    "true",
 			wantRaw: `{"token":true}`,
+		},
+		{
+			name:    "big integer keeps precision",
+			method:  http.MethodPost,
+			ct:      "application/json",
+			body:    `{"id":9007199254740993}`,
+			field:   "id",
+			want:    "9007199254740993",
+			wantRaw: `{"id":9007199254740993}`,
+		},
+		{
+			name:    "decimal literal preserved",
+			method:  http.MethodPost,
+			ct:      "application/json",
+			body:    `{"price":1.50}`,
+			field:   "price",
+			want:    "1.50",
+			wantRaw: `{"price":1.50}`,
 		},
 		{
 			name:    "object json field ignored",

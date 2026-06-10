@@ -25,14 +25,15 @@ go get github.com/gtkit/ginx
 
 | 函数 / 类型 | 说明 |
 |---|---|
-| `ParseBody(c) BodySources` | 解析并按请求缓存 body，返回 `Available` / `JSON` / `Form` |
+| `ParseBody(c) BodySources` | 解析并按请求缓存 body，返回 `Available` / `JSON` / `Form` / `Err` |
 | `BodyString(c, field) string` | 从 body 取字段并转字符串（JSON 标量或 form 值） |
 | `BindBody(c, obj) error` | 只把 body 绑定到 obj，不信任 query |
 | `SingleValueHeader(c, key) (string, error)` | 读取并校验单值 header |
 | `LimitRequestBody(c, maxBytes)` | 为 body 设置硬上限（`http.MaxBytesReader`） |
 | `IsRequestBodyTooLarge(err) bool` | 判断 err 是否因 body 超过硬上限产生 |
 | `MaxBodyBytes` | `ParseBody` 的解析软上限（8 KiB） |
-| `ErrDuplicateHeader` / `ErrInvalidHeaderValue` / `ErrInvalidBindContext` | 哨兵错误 |
+| `ErrDuplicateHeader` / `ErrInvalidHeaderValue` / `ErrInvalidBindContext` | header / 绑定哨兵错误 |
+| `ErrNoBody` / `ErrBodyTooLarge` / `ErrUnsupportedContentType` / `ErrMalformedBody` | `ParseBody` 失败原因哨兵错误（经 `BodySources.Err` 透出） |
 
 ## 用法
 
@@ -40,10 +41,15 @@ go get github.com/gtkit/ginx
 
 ```go
 src := ginx.ParseBody(c)
-if src.Available {
-    name, _ := src.JSON["name"].(string) // JSON body
-    page := src.Form.Get("page")         // form body
+if !src.Available {
+    // 失败原因可判定：ErrNoBody / ErrBodyTooLarge / ErrUnsupportedContentType / ErrMalformedBody
+    if errors.Is(src.Err, ginx.ErrBodyTooLarge) {
+        // body 超过 MaxBodyBytes 软上限
+    }
+    return
 }
+name, _ := src.JSON["name"].(string) // JSON body（数字为 json.Number，原文不丢精度）
+page := src.Form.Get("page")         // form body
 ```
 
 ### 只绑 body + 硬限长
@@ -80,3 +86,10 @@ case errors.Is(err, ginx.ErrInvalidHeaderValue):
 - `LimitRequestBody`（硬）：包装 `c.Request.Body`，对整个请求生命周期内的任何读取生效，超限即返回 `*http.MaxBytesError`。
 
 二者互补：`ParseBody` 用于"轻量探取 body 中的字段"，`LimitRequestBody` 用于"防御性地封顶请求体"。
+
+## 使用约束
+
+- **并发**：与 gin.Context 一致，本包函数会替换 `c.Request.Body`、临时修改 `URL.RawQuery`，仅限在处理该请求的 handler goroutine 内调用
+- **multipart/form-data 不支持**：multipart 通常携带文件、体积大，与按 `MaxBodyBytes` 轻量探取的定位冲突
+- **`BindBody` 一次性语义**：绑定会消费 body 流，同一请求内二次调用读到空 body；如需先探取字段再绑定，先 `ParseBody`（会回填 body）再 `BindBody`
+- **JSON 数字**：以 `json.Number` 原文承载，`BodyString` 对任意大小的整数不丢精度（如雪花 ID）
