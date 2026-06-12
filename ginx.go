@@ -21,7 +21,7 @@ import (
 	"strconv"
 	"strings"
 
-	gtkitjson "github.com/gtkit/json"
+	gtkitjson "github.com/gtkit/json/v2"
 
 	"github.com/gin-gonic/gin"
 )
