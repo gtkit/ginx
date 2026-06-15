@@ -78,23 +78,27 @@ func ParseBody(c *gin.Context) (sources BodySources) {
 			return cached
 		}
 	}
-	defer func() {
-		c.Set(ctxKeyBodyParseCache, sources)
-	}()
-
 	if err := skipBodyParse(c); err != nil {
-		return BodySources{Err: err}
+		sources = BodySources{Err: err}
+		c.Set(ctxKeyBodyParseCache, sources)
+		return
 	}
 
 	rawBody, err := readAndRestoreBody(c)
 	if err != nil {
-		return BodySources{Err: err}
+		sources = BodySources{Err: err}
+		c.Set(ctxKeyBodyParseCache, sources)
+		return
 	}
 	if len(rawBody) > MaxBodyBytes {
-		return BodySources{Err: ErrBodyTooLarge}
+		sources = BodySources{Err: ErrBodyTooLarge}
+		c.Set(ctxKeyBodyParseCache, sources)
+		return
 	}
 
-	return parseRawBodySources(c.ContentType(), rawBody)
+	sources = parseRawBodySources(c.ContentType(), rawBody)
+	c.Set(ctxKeyBodyParseCache, sources)
+	return
 }
 
 // BodyString 从请求 body 中读取指定字段并转为字符串：JSON body 支持 string/bool/number/Stringer
@@ -169,6 +173,20 @@ func IsRequestBodyTooLarge(err error) bool {
 	return errors.As(err, &maxErr)
 }
 
+// ContextValue 从 gin.Context 的键值存储中读取 key 关联的值并以类型 T 返回。
+// 常用于中间件注入的值（如用户 ID、角色等）；key 不存在或类型不匹配时返回 (zero, false)。
+func ContextValue[T any](c *gin.Context, key string) (val T, ok bool) {
+	if c == nil {
+		return val, false
+	}
+	v, ok := c.Get(key)
+	if !ok {
+		return val, false
+	}
+	val, ok = v.(T)
+	return val, ok
+}
+
 // SingleValueHeader 读取并校验单值 header：去空白后忽略空值，值含逗号视为非法
 // （ErrInvalidHeaderValue），出现多个非空值视为重复（ErrDuplicateHeader）。
 // 恰好一个非空值时返回该值，全部为空时返回空串且无错误。
@@ -195,6 +213,16 @@ func SingleValueHeader(c *gin.Context, headerKey string) (string, error) {
 		return nonEmpty[0], nil
 	}
 	return "", nil
+}
+
+// Header 读取单值 header 并解析为 T。去空白后忽略空值，值含逗号视为非法、多个非空值视为重复，
+// 均返回 def。需要严格校验时请使用 SingleValueHeader。
+func Header[T Scalar](c *gin.Context, key string, def T) T {
+	v, err := SingleValueHeader(c, key)
+	if err != nil || v == "" {
+		return def
+	}
+	return parseScalar(v, def)
 }
 
 // skipBodyParse 判断是否应跳过 body 解析，返回跳过原因：body 为 nil、GET/HEAD 方法返回 ErrNoBody，
@@ -241,24 +269,22 @@ func parseRawBodySources(contentType string, rawBody []byte) BodySources {
 
 // readAndRestoreBody 读取至多 MaxBodyBytes+1 字节的 body（多读 1 字节用于判断是否超限），
 // 并通过 multiReadCloser 把已读内容拼回 c.Request.Body，保证后续 ShouldBind 仍能完整读取。
-// 对 ContentLength 已知与 chunked（未知长度）两种情况分别处理。
+//
+// 对于 ContentLength 已知的请求，skipBodyParse 已保证 body 不超过限制，读取后 body 始终耗尽，
+// 直接用 bytes.NewReader 恢复即可。对于 chunked（ContentLength < 0），仅在读到限制上限时
+// 才需要 io.MultiReader 保留未读的剩余部分；未触顶时 body 已耗尽，同样使用 bytes.NewReader。
 func readAndRestoreBody(c *gin.Context) ([]byte, error) {
 	body := c.Request.Body
-	limit := int64(MaxBodyBytes) + 1
-	if c.Request.ContentLength >= 0 {
-		raw, err := io.ReadAll(io.LimitReader(body, limit))
+	raw, err := io.ReadAll(io.LimitReader(body, int64(MaxBodyBytes)+1))
+	if c.Request.ContentLength < 0 && len(raw) > MaxBodyBytes {
+		c.Request.Body = newMultiReadCloser(io.MultiReader(bytes.NewReader(raw), body), body)
+	} else {
 		c.Request.Body = newMultiReadCloser(bytes.NewReader(raw), body)
-		if err != nil {
-			return raw, fmt.Errorf("read body: %w", err)
-		}
-		return raw, nil
 	}
-	peeked, err := io.ReadAll(io.LimitReader(body, limit))
-	c.Request.Body = newMultiReadCloser(io.MultiReader(bytes.NewReader(peeked), body), body)
 	if err != nil {
-		return peeked, fmt.Errorf("read chunked body: %w", err)
+		return raw, fmt.Errorf("read body: %w", err)
 	}
-	return peeked, nil
+	return raw, nil
 }
 
 type multiReadCloser struct {

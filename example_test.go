@@ -122,6 +122,24 @@ func ExampleParam() {
 	// Output: 42
 }
 
+func ExampleQuerySlice() {
+	c := newPostContext("application/json", "{}")
+	c.Request.URL.RawQuery = "id=1&id=2&id=3"
+
+	ids := ginx.QuerySlice[int64](c, "id")
+	fmt.Println(ids[0], ids[1], ids[2])
+	// Output: 1 2 3
+}
+
+func ExampleContextValue() {
+	c := newPostContext("application/json", "{}")
+	c.Set("user_id", int64(42))
+
+	uid, ok := ginx.ContextValue[int64](c, "user_id")
+	fmt.Println(uid, ok)
+	// Output: 42 true
+}
+
 func ExampleRequireContentType() {
 	c := newPostContext("text/plain", "hello")
 
@@ -138,6 +156,21 @@ func ExampleSingleValueHeader() {
 	_, err := ginx.SingleValueHeader(c, "X-Token")
 	fmt.Println(errors.Is(err, ginx.ErrDuplicateHeader))
 	// Output: true
+}
+
+func ExampleBody() {
+	c := newPostContext("application/json", `{"count":3}`)
+
+	fmt.Println(ginx.Body(c, "count", 0))
+	// Output: 3
+}
+
+func ExampleHeader() {
+	c := newPostContext("application/json", "{}")
+	c.Request.Header.Set("X-Page", "42")
+
+	fmt.Println(ginx.Header(c, "X-Page", int64(0)))
+	// Output: 42
 }
 
 func ExampleLimitRequestBody() {

@@ -98,6 +98,101 @@ func TestSingleValueHeader(t *testing.T) {
 	}
 }
 
+func TestHeader(t *testing.T) {
+	tests := []struct {
+		name    string
+		values  []string
+		want    string
+		wantDef string
+	}{
+		{name: "single string", values: []string{"abc"}, want: "abc"},
+		{name: "single int", values: []string{"42"}, want: "42"},
+		{name: "blank ignored", values: []string{"", "val"}, want: "val"},
+		{name: "missing", wantDef: "def"},
+		{name: "duplicate → default", values: []string{"a", "b"}, wantDef: "def"},
+		{name: "comma → default", values: []string{"a,b"}, wantDef: "def"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := newContext(http.MethodGet, "/x", "", "")
+			for _, v := range tt.values {
+				c.Request.Header.Add("X-Test", v)
+			}
+			want := tt.want
+			if tt.wantDef != "" {
+				want = tt.wantDef
+			}
+			if got := Header(c, "X-Test", "def"); got != want {
+				t.Fatalf("Header = %q, want %q", got, want)
+			}
+		})
+	}
+
+	// bool 类型
+	c := newContext(http.MethodGet, "/x", "", "")
+	c.Request.Header.Set("X-Flag", "true")
+	if got := Header(c, "X-Flag", false); got != true {
+		t.Fatalf("Header[bool] = %v, want true", got)
+	}
+
+	// int 类型
+	c.Request.Header.Set("X-Count", "42")
+	if got := Header(c, "X-Count", int64(0)); got != 42 {
+		t.Fatalf("Header[int64] = %d, want 42", got)
+	}
+
+	// nil context
+	if got := Header(nil, "any", "def"); got != "def" {
+		t.Fatalf("nil context = %q, want def", got)
+	}
+}
+
+func TestContextValue(t *testing.T) {
+	c := &gin.Context{}
+	c.Set("user_id", int64(42))
+	c.Set("role", "admin")
+	c.Set("enabled", true)
+	c.Set("score", 3.14)
+
+	v, ok := ContextValue[int64](c, "user_id")
+	if !ok || v != 42 {
+		t.Fatalf("ContextValue[int64] = %d, %v, want 42, true", v, ok)
+	}
+
+	v2, ok := ContextValue[string](c, "role")
+	if !ok || v2 != "admin" {
+		t.Fatalf("ContextValue[string] = %q, %v, want admin, true", v2, ok)
+	}
+
+	v3, ok := ContextValue[bool](c, "enabled")
+	if !ok || v3 != true {
+		t.Fatalf("ContextValue[bool] = %v, %v, want true, true", v3, ok)
+	}
+
+	v4, ok := ContextValue[float64](c, "score")
+	if !ok || v4 != 3.14 {
+		t.Fatalf("ContextValue[float64] = %v, %v, want 3.14, true", v4, ok)
+	}
+
+	// missing key
+	v5, ok := ContextValue[string](c, "missing")
+	if ok || v5 != "" {
+		t.Fatalf("missing key = %q, %v, want '', false", v5, ok)
+	}
+
+	// type mismatch
+	v6, ok := ContextValue[string](c, "user_id")
+	if ok || v6 != "" {
+		t.Fatalf("type mismatch = %q, %v, want '', false", v6, ok)
+	}
+
+	// nil context
+	v7, ok := ContextValue[string](nil, "key")
+	if ok || v7 != "" {
+		t.Fatalf("nil context = %q, %v, want '', false", v7, ok)
+	}
+}
+
 func TestParseBody(t *testing.T) {
 	tests := []struct {
 		name     string

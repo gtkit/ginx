@@ -58,6 +58,88 @@ func Param[T Scalar](c *gin.Context, key string, def T) T {
 	return parseScalar(c.Param(key), def)
 }
 
+// Body 从请求 body 中读取指定 field 并解析为 T。按 JSON → Form 的顺序查找 field。
+// 值缺失、类型不匹配、body 不可解析（含 GET/HEAD、Content-Type 不匹配等）时返回 def，
+// 不 panic、不返回错误。需要严格校验时请先 ParseBody 再自行处理。
+//
+// 本函数通过 ParseBody 缓存，同一请求内多次调用或与 BodyString 混用只解析一次 body。
+func Body[T Scalar](c *gin.Context, field string, def T) T {
+	sources := ParseBody(c)
+	if !sources.Available {
+		return def
+	}
+	if v := jsonScalarString(sources.JSON[field]); v != "" {
+		return parseScalar(v, def)
+	}
+	return parseScalar(sources.Form.Get(field), def)
+}
+
+// QuerySlice 从 query 参数读取 key 的多个值并返回类型 T 的切片。
+// 例如 ?id=1&id=2&id=3 可经 QuerySlice[int64](c, "id") 取得 []int64{1,2,3}。
+// 非空字符串总是有效；非 string 类型的值中解析失败的条目被静默跳过。
+// key 不存在、context 为 nil 或无有效值时返回 nil。
+func QuerySlice[T Scalar](c *gin.Context, key string) []T {
+	if c == nil || c.Request == nil {
+		return nil
+	}
+	values, ok := c.Request.URL.Query()[key]
+	if !ok || len(values) == 0 {
+		return nil
+	}
+	result := make([]T, 0, len(values))
+	for _, v := range values {
+		if p, ok := parseScalarValue[T](v); ok {
+			result = append(result, p)
+		}
+	}
+	return result
+}
+
+// parseScalarValue 将去空白后的 s 解析为 T 并报告是否成功；s 为空时直接返回失败。
+func parseScalarValue[T Scalar](s string) (T, bool) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return *new(T), false
+	}
+	var out T
+	switch p := any(&out).(type) {
+	case *string:
+		*p = s
+		return out, true
+	case *int:
+		v, err := strconv.Atoi(s)
+		if err != nil {
+			return out, false
+		}
+		*p = v
+	case *int64:
+		v, err := strconv.ParseInt(s, 10, 64)
+		if err != nil {
+			return out, false
+		}
+		*p = v
+	case *uint64:
+		v, err := strconv.ParseUint(s, 10, 64)
+		if err != nil {
+			return out, false
+		}
+		*p = v
+	case *bool:
+		v, err := strconv.ParseBool(s)
+		if err != nil {
+			return out, false
+		}
+		*p = v
+	case *float64:
+		v, err := strconv.ParseFloat(s, 64)
+		if err != nil {
+			return out, false
+		}
+		*p = v
+	}
+	return out, true
+}
+
 // parseScalar 将去空白后的 s 解析为 T；s 为空或解析失败时返回 def。
 func parseScalar[T Scalar](s string, def T) T {
 	s = strings.TrimSpace(s)

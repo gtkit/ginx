@@ -9,6 +9,7 @@ permissions:
   contents: read
 
 jobs:
+  # 代码静态检查：golangci-lint 聚合扫描
   lint:
     runs-on: ubuntu-latest
     steps:
@@ -20,6 +21,7 @@ jobs:
         with:
           version: latest
 
+  # 单元测试 + 竞态检测 + 覆盖率 + 基准测试基线
   test:
     runs-on: ubuntu-latest
     steps:
@@ -27,5 +29,9 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      # go vet 静态分析
       - run: go vet ./...
+      # 带竞态检测的单元测试，输出覆盖率报告
       - run: go test -race -count=1 -timeout=5m -coverprofile=coverage.out ./...
+      # 基准测试，用于跟踪性能基线变化
+      - run: go test -bench=. -benchmem -count=1 -timeout=5m ./...
