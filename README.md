@@ -20,7 +20,7 @@
 
 gin 的 `ShouldBind`、`c.Query`、`c.Param` 等原生 API 在简单场景下足够好用，但在跨服务、生产级别的 Go 服务中，几个反复出现的痛点并没有原生解决：
 
-**body 是一次性资源。** gin 的 body 读取流在第一个消费者消费后即关闭，后续调用 `ShouldBind` 读到空 body。本包在读取后自动回填，使 `ParseBody`、`RawBody`、`BindBody` 之间可自由组合、调用顺序无关。
+**body 是一次性资源。** gin 的 body 读取流在第一个消费者消费后即关闭，后续调用 `ShouldBind` 读到空 body。本包在读取后自动回填：`ParseBody`、`RawBody` 读取后回填完整字节并按请求缓存，可重复调用、彼此自由组合；而 `BindBody` 直接消费 body 流（一次性语义），其后不应再假定 body 可读，需要重复绑定（如 webhook 先验签再绑定）请用 `BindBodyCached`。
 
 **输入来源的信任边界需要显式划分。** gin 的 `ShouldBind` 在 form 模式下会合并 URL query 和 body，这在大多数安全敏感场景是不期望的——攻击者可以在 URL 中注入参数覆盖 body 中的字段。`BindBody` 通过临时清空 `RawQuery` 严格执行"只信 body、不信 query"原则。
 
@@ -52,14 +52,18 @@ go get github.com/gtkit/ginx
 | `RequireContentType(c, types...) error` | Content-Type 白名单校验 |
 | `SingleValueHeader(c, key) (string, error)` | 读取并校验单值 header |
 | `SingleValueQuery(c, key) (string, error)` | 读取并校验单值 query（防参数污染） |
-| `Query[T](c, key, def) T` / `Param[T](c, key, def) T` | 泛型类型化取值，缺失/非法回退默认值 |
+| `Query[T](c, key, def) T` / `Param[T](c, key, def) T` | 泛型类型化取值，缺失/非法回退默认值（宽松） |
+| `QueryStrict[T](c, key) (T, error)` | 严格类型化取单值 query，区分缺失/重复/非法，便于返回 400 |
 | `QuerySlice[T](c, key) []T` | 重复 query 参数的类型化切片提取（如 `?id=1&id=2`），无效值静默跳过 |
+| `QuerySliceStrict[T](c, key) ([]T, error)` | 严格切片提取，遇任一非法值（含空值）报错，不静默跳过 |
 | `Body[T](c, field, def) T` | 从 body（JSON / Form）取字段并类型化，通过 ParseBody 缓存 |
 | `Header[T](c, key, def) T` | 读取单值 header 并类型化，重复/非法回退默认值 |
 | `ContextValue[T](c, key) (T, bool)` | 从 gin.Context 键值存储中读取类型化值（中间件注入），类型不匹配返回 false |
 | `LimitRequestBody(c, maxBytes)` | 为 body 设置硬上限（`http.MaxBytesReader`） |
 | `IsRequestBodyTooLarge(err) bool` | 判断 err 是否因 body 超过硬上限产生 |
 | `MaxBodyBytes` | `ParseBody` 的解析软上限（8 KiB） |
+| `ContentTypeJSON` / `ContentTypeForm` | body Content-Type 常量，供 `RequireContentType` 等使用 |
+| `ErrDuplicateQuery` / `ErrQueryMissing` / `ErrInvalidQueryValue` | `QueryStrict` / `QuerySliceStrict` 哨兵错误 |
 | `ErrDuplicateHeader` / `ErrInvalidHeaderValue` / `ErrInvalidBindContext` | header / 绑定哨兵错误 |
 | `ErrNoBody` / `ErrBodyTooLarge` / `ErrUnsupportedContentType` / `ErrMalformedBody` | `ParseBody` 失败原因哨兵错误（经 `BodySources.Err` 透出） |
 
@@ -119,6 +123,22 @@ id   := ginx.Param(c, "id", int64(0))   // 路由 /user/:id
 uid, err := ginx.SingleValueQuery(c, "uid") // ?uid=1&uid=2 -> ErrDuplicateQuery
 ```
 
+> `Query[T]` 是宽松便利函数：同名参数出现多个值（`?id=1&id=2`）时静默取第一个，缺失/非法回退默认值，不报错。
+> 需要严格区分缺失/重复/非法、或防御 HTTP 参数污染时，请改用 `QueryStrict` 或 `SingleValueQuery`。
+
+需要明确报错（区分缺失 / 重复 / 非法，便于返回 400）时用严格版：
+
+```go
+id, err := ginx.QueryStrict[int64](c, "id")
+switch {
+case errors.Is(err, ginx.ErrQueryMissing):      // 参数缺失
+case errors.Is(err, ginx.ErrDuplicateQuery):    // ?id=1&id=2 参数污染
+case errors.Is(err, ginx.ErrInvalidQueryValue): // 无法解析为 int64
+}
+
+ids, err := ginx.QuerySliceStrict[int64](c, "id") // ?id=1&id=abc -> ErrInvalidQueryValue（不静默跳过）
+```
+
 ### 重复 query 参数的类型化切片
 
 ```go
@@ -148,7 +168,7 @@ role, _ := ginx.ContextValue[string](c, "role")
 ### Content-Type 白名单
 
 ```go
-if err := ginx.RequireContentType(c, "application/json"); err != nil {
+if err := ginx.RequireContentType(c, ginx.ContentTypeJSON); err != nil {
     c.AbortWithStatus(http.StatusUnsupportedMediaType) // 415
     return
 }

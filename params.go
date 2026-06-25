@@ -2,14 +2,21 @@ package ginx
 
 import (
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
 )
 
-// ErrDuplicateQuery 表示同名 query 参数出现了多个非空值（HTTP 参数污染）。
-var ErrDuplicateQuery = errors.New("query parameter provided multiple times")
+var (
+	// ErrDuplicateQuery 表示同名 query 参数出现了多个非空值（HTTP 参数污染）。
+	ErrDuplicateQuery = errors.New("query parameter provided multiple times")
+	// ErrQueryMissing 表示严格取值时 query 参数缺失或去空白后为空。
+	ErrQueryMissing = errors.New("query parameter missing")
+	// ErrInvalidQueryValue 表示严格取值时 query 值无法解析为目标类型，错误中附带该值。
+	ErrInvalidQueryValue = errors.New("query parameter has invalid value")
+)
 
 // Scalar 是 Query 与 Param 支持的取值类型集合。约束使用精确类型（不带 ~）以保证零反射解析；
 // 命名类型（如 type ID int64）请按底层类型取值后自行转换。
@@ -48,6 +55,26 @@ func Query[T Scalar](c *gin.Context, key string, def T) T {
 		return def
 	}
 	return parseScalar(c.Query(key), def)
+}
+
+// QueryStrict 严格读取并类型化单值 query 参数：复用 SingleValueQuery 的查重语义，同名参数出现
+// 多个非空值时返回 ErrDuplicateQuery（防 HTTP 参数污染）；缺失或去空白后为空返回 ErrQueryMissing；
+// 解析为 T 失败返回附带原值的 ErrInvalidQueryValue。三种情形均可用 errors.Is 判定，便于上层返回 400。
+// 需要宽松取值（缺失/非法静默回退默认值）时用 Query。
+func QueryStrict[T Scalar](c *gin.Context, key string) (T, error) {
+	var zero T
+	raw, err := SingleValueQuery(c, key)
+	if err != nil {
+		return zero, err
+	}
+	if raw == "" {
+		return zero, ErrQueryMissing
+	}
+	v, ok := parseScalarValue[T](raw)
+	if !ok {
+		return zero, fmt.Errorf("%w: %q", ErrInvalidQueryValue, raw)
+	}
+	return v, nil
 }
 
 // Param 从路由参数（如 /user/:id 的 id）读取 key 并解析为 T，缺失与解析失败的回退语义同 Query。
@@ -93,6 +120,28 @@ func QuerySlice[T Scalar](c *gin.Context, key string) []T {
 		}
 	}
 	return result
+}
+
+// QuerySliceStrict 严格版 QuerySlice：?id=1&id=2&id=3 取得 []T，遇到任一无法解析为 T 的值
+// （含去空白后为空的值）立即返回附带该值的 ErrInvalidQueryValue，不静默跳过。适合接口入参校验。
+// key 不存在、context 为 nil 时返回 (nil, nil)，由调用方按 len 判断是否缺失。
+func QuerySliceStrict[T Scalar](c *gin.Context, key string) ([]T, error) {
+	if c == nil || c.Request == nil || c.Request.URL == nil {
+		return nil, nil
+	}
+	values, ok := c.Request.URL.Query()[key]
+	if !ok || len(values) == 0 {
+		return nil, nil
+	}
+	result := make([]T, 0, len(values))
+	for _, v := range values {
+		p, ok := parseScalarValue[T](v)
+		if !ok {
+			return nil, fmt.Errorf("%w: %q", ErrInvalidQueryValue, strings.TrimSpace(v))
+		}
+		result = append(result, p)
+	}
+	return result, nil
 }
 
 // parseScalarValue 将去空白后的 s 解析为 T 并报告是否成功；s 为空时直接返回失败。

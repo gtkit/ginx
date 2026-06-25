@@ -3,6 +3,7 @@ package ginx
 import (
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -75,6 +76,89 @@ func TestQuery(t *testing.T) {
 	}
 	if got := Query(nil, "page", 7); got != 7 {
 		t.Fatalf("nil context = %d, want default 7", got)
+	}
+}
+
+func TestQueryStrict(t *testing.T) {
+	tests := []struct {
+		name    string
+		target  string
+		wantErr error
+		want    int64
+	}{
+		{name: "ok", target: "/x?id=42", want: 42},
+		{name: "trimmed", target: "/x?id=%2042%20", want: 42},
+		{name: "missing", target: "/x", wantErr: ErrQueryMissing},
+		{name: "blank", target: "/x?id=%20%20", wantErr: ErrQueryMissing},
+		{name: "duplicate", target: "/x?id=1&id=2", wantErr: ErrDuplicateQuery},
+		{name: "invalid", target: "/x?id=abc", wantErr: ErrInvalidQueryValue},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := newContext(http.MethodGet, tt.target, "", "")
+			got, err := QueryStrict[int64](c, "id")
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("err = %v, want %v", err, tt.wantErr)
+			}
+			if tt.wantErr == nil && got != tt.want {
+				t.Fatalf("got = %d, want %d", got, tt.want)
+			}
+			if tt.wantErr != nil && got != 0 {
+				t.Fatalf("got = %d on error, want zero", got)
+			}
+		})
+	}
+
+	// 非法值错误应附带原值，便于定位
+	c := newContext(http.MethodGet, "/x?id=abc", "", "")
+	if _, err := QueryStrict[int64](c, "id"); err == nil || !strings.Contains(err.Error(), "abc") {
+		t.Fatalf("invalid err = %v, want contain %q", err, "abc")
+	}
+
+	// string 类型：非空即合法
+	c = newContext(http.MethodGet, "/x?name=%20alice%20", "", "")
+	if got, err := QueryStrict[string](c, "name"); err != nil || got != "alice" {
+		t.Fatalf("string got %q err %v, want alice nil", got, err)
+	}
+
+	if _, err := QueryStrict[int64](nil, "id"); !errors.Is(err, ErrQueryMissing) {
+		t.Fatalf("nil context err = %v, want ErrQueryMissing", err)
+	}
+}
+
+func TestQuerySliceStrict(t *testing.T) {
+	// 全部合法
+	c := newContext(http.MethodGet, "/x?id=1&id=2&id=3", "", "")
+	got, err := QuerySliceStrict[int64](c, "id")
+	if err != nil || len(got) != 3 || got[0] != 1 || got[2] != 3 {
+		t.Fatalf("got %v err %v, want [1 2 3] nil", got, err)
+	}
+
+	// 含非法值 → 报错并附带该值，不静默跳过
+	c = newContext(http.MethodGet, "/x?id=1&id=abc&id=3", "", "")
+	got, err = QuerySliceStrict[int64](c, "id")
+	if !errors.Is(err, ErrInvalidQueryValue) || got != nil {
+		t.Fatalf("got %v err %v, want nil ErrInvalidQueryValue", got, err)
+	}
+	if !strings.Contains(err.Error(), "abc") {
+		t.Fatalf("err = %v, want contain %q", err, "abc")
+	}
+
+	// 含空值 → 严格模式视为非法
+	c = newContext(http.MethodGet, "/x?id=1&id=%20&id=3", "", "")
+	if _, err := QuerySliceStrict[int64](c, "id"); !errors.Is(err, ErrInvalidQueryValue) {
+		t.Fatalf("blank err = %v, want ErrInvalidQueryValue", err)
+	}
+
+	// 缺失 key → (nil, nil)
+	c = newContext(http.MethodGet, "/x", "", "")
+	if got, err := QuerySliceStrict[int64](c, "id"); err != nil || got != nil {
+		t.Fatalf("missing got %v err %v, want nil nil", got, err)
+	}
+
+	// nil context → (nil, nil)
+	if got, err := QuerySliceStrict[int64](nil, "id"); err != nil || got != nil {
+		t.Fatalf("nil context got %v err %v, want nil nil", got, err)
 	}
 }
 

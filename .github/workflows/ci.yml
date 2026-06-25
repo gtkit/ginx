@@ -35,3 +35,19 @@ jobs:
       - run: go test -race -count=1 -timeout=5m -coverprofile=coverage.out ./...
       # 基准测试，用于跟踪性能基线变化
       - run: go test -bench=. -benchmem -count=1 -timeout=5m ./...
+
+  # JSON backend 兼容矩阵：gin 允许通过 build tag 切换 JSON 实现，
+  # 不同实现对 *http.MaxBytesError 的保留方式不同（jsoniter 改写、go_json 吞成 EOF），
+  # 必须逐一验证硬限长识别等 backend 敏感行为不回归。
+  test-json-backends:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        tags: [jsoniter, go_json, sonic]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go test -tags=${{ matrix.tags }} -race -count=1 -timeout=5m ./...

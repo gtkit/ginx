@@ -30,8 +30,20 @@ import (
 // 它只约束本包的解析行为；如需对整个请求生命周期施加硬上限，请用 LimitRequestBody。
 const MaxBodyBytes = 8 * 1024
 
+// 本包支持解析的两种 body Content-Type，供调用方传给 RequireContentType 等，避免手写字符串。
+const (
+	// ContentTypeJSON 即 application/json。
+	ContentTypeJSON = "application/json"
+	// ContentTypeForm 即 application/x-www-form-urlencoded。
+	ContentTypeForm = "application/x-www-form-urlencoded"
+)
+
 // ctxKeyBodyParseCache 是 body 解析结果在 gin.Context 上的缓存键，使同一请求内只解析一次 body。
 const ctxKeyBodyParseCache = "ginx.body_parse_cache"
+
+// ctxKeyBodyLimitState 是硬限长溢出状态在 gin.Context 上的存储键。LimitRequestBody 包装的 reader
+// 在底层读到 *http.MaxBytesError 时把它记到这里，使超限识别不依赖各 JSON backend 是否保留该错误。
+const ctxKeyBodyLimitState = "ginx.body_limit_state"
 
 var (
 	// ErrDuplicateHeader 表示同一 header 出现了多个非空值。
@@ -148,6 +160,11 @@ func BindBody(c *gin.Context, obj any) error {
 	defer func() { c.Request.URL.RawQuery = rawQuery }()
 
 	if err := c.ShouldBind(obj); err != nil {
+		// 部分 JSON backend（jsoniter/go_json）会丢弃或改写 *http.MaxBytesError，
+		// 此处优先回填 reader 层捕获到的硬上限错误，保证 IsRequestBodyTooLarge 跨 backend 一致。
+		if maxErr := requestBodyLimitError(c); maxErr != nil {
+			return fmt.Errorf("bind body: %w", maxErr)
+		}
 		return fmt.Errorf("bind body: %w", err)
 	}
 	return nil
@@ -163,14 +180,68 @@ func LimitRequestBody(c *gin.Context, maxBytes int64) {
 	if c == nil || c.Request == nil || c.Request.Body == nil || maxBytes <= 0 {
 		return
 	}
-	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxBytes)
+	state := &bodyLimitState{}
+	inner := http.MaxBytesReader(c.Writer, c.Request.Body, maxBytes)
+	c.Request.Body = &limitedBodyReader{inner: inner, state: state}
+	c.Set(ctxKeyBodyLimitState, state)
 }
 
 // IsRequestBodyTooLarge 判断 err 链中是否含 *http.MaxBytesError，即请求 body 是否超过了
 // LimitRequestBody 设定的硬上限，便于上游据此返回 413 Request Entity Too Large。
 func IsRequestBodyTooLarge(err error) bool {
-	var maxErr *http.MaxBytesError
-	return errors.As(err, &maxErr)
+	_, ok := errors.AsType[*http.MaxBytesError](err)
+	return ok
+}
+
+// bodyLimitState 记录 LimitRequestBody 包装的 reader 在读取过程中是否触发了硬上限。
+// 一旦底层 http.MaxBytesReader 返回 *http.MaxBytesError，就把它保存下来，供 BindBody 在
+// ShouldBind 出错后回填——因为部分 gin JSON backend（jsoniter/go_json）会丢弃或改写该错误，
+// 导致 errors.As 无法识别，必须在 reader 层自行捕获。
+type bodyLimitState struct {
+	maxErr *http.MaxBytesError
+}
+
+// limitedBodyReader 包装 http.MaxBytesReader：透传读取与关闭语义，同时在读到 *http.MaxBytesError
+// 时把它记入 state，使硬上限识别不依赖下游解码器是否保留该错误。
+type limitedBodyReader struct {
+	inner io.ReadCloser
+	state *bodyLimitState
+}
+
+// Read 透传底层读取并保留其原始错误（含 io.EOF）；读到硬上限错误时记入 state。
+//
+//nolint:wrapcheck // Preserve io.Reader sentinel errors such as io.EOF and *http.MaxBytesError.
+func (l *limitedBodyReader) Read(p []byte) (int, error) {
+	n, err := l.inner.Read(p)
+	if err != nil {
+		if maxErr, ok := errors.AsType[*http.MaxBytesError](err); ok {
+			l.state.maxErr = maxErr
+		}
+	}
+	return n, err
+}
+
+// Close 透传底层 body 的关闭语义。
+//
+//nolint:wrapcheck // Preserve the wrapped body close semantics.
+func (l *limitedBodyReader) Close() error {
+	return l.inner.Close()
+}
+
+// requestBodyLimitError 返回本请求在读取 body 过程中捕获到的硬上限错误；未设硬上限或未超限时返回 nil。
+func requestBodyLimitError(c *gin.Context) *http.MaxBytesError {
+	if c == nil {
+		return nil
+	}
+	v, ok := c.Get(ctxKeyBodyLimitState)
+	if !ok {
+		return nil
+	}
+	state, ok := v.(*bodyLimitState)
+	if !ok {
+		return nil
+	}
+	return state.maxErr
 }
 
 // ContextValue 从 gin.Context 的键值存储中读取 key 关联的值并以类型 T 返回。
@@ -245,7 +316,7 @@ func skipBodyParse(c *gin.Context) error {
 // 其他类型或解析失败返回 Available 为 false 并携带相应 Err。
 func parseRawBodySources(contentType string, rawBody []byte) BodySources {
 	switch strings.ToLower(contentType) {
-	case "application/json":
+	case ContentTypeJSON:
 		dec := gtkitjson.NewDecoder(bytes.NewReader(rawBody))
 		dec.UseNumber()
 		var m map[string]any
@@ -256,7 +327,7 @@ func parseRawBodySources(contentType string, rawBody []byte) BodySources {
 			return BodySources{Err: fmt.Errorf("%w: unexpected trailing data", ErrMalformedBody)}
 		}
 		return BodySources{Available: true, JSON: m}
-	case "application/x-www-form-urlencoded":
+	case ContentTypeForm:
 		values, err := url.ParseQuery(string(rawBody))
 		if err != nil {
 			return BodySources{Err: fmt.Errorf("%w: %w", ErrMalformedBody, err)}
